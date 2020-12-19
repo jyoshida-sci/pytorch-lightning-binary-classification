@@ -295,91 +295,6 @@ class TransferLearningModel(pl.LightningModule):
                         '0performance/acc_val': acc_mean,
                         'step': self.current_epoch}}
 
-    def test_step(self, batch, batch_idx):
-        x, y = batch
-        y_logits = self.forward(x)
-        y_true = y.view((-1, 1)).type_as(x)
-        y_bin = torch.ge(y_logits, 0)
-        num_correct = torch.eq(y_bin.view(-1), y_true.view(-1)).sum()
-        #
-        specified_label= self.hparams.specified_label
-        tensor_filled_specified_label = torch.full_like(y_bin, specified_label)
-        num_specified_label_in_pred = torch.sum(y_bin == specified_label)
-        num_specified_label_in_target = torch.sum(y_true == specified_label)
-        true_or_false_in_pred = torch.eq(y_bin, tensor_filled_specified_label)
-        true_or_false_in_target = torch.eq(y_true, tensor_filled_specified_label)
-        num_specified_right = torch.mul(true_or_false_in_pred, true_or_false_in_target).sum()
-        #
-        output = OrderedDict({'y':y,
-                              'y_logits':y_logits,
-                              'num_correct': num_correct,
-                              'num_specified_label_in_pred': num_specified_label_in_pred,
-                              'num_specified_label_in_target': num_specified_label_in_target,
-                              'num_specified_right': num_specified_right})
-        return output
-
-
-    def test_epoch_end(self, outputs):
-        outputdir = self.trainer.weights_save_path
-        print(outputdir)
-        #
-        list_y = torch.cat([output['y'] for output in outputs]).view(-1).tolist()
-        list_y_logits = torch.cat([output['y_logits'] for output in outputs]).view(-1).tolist()
-        #
-        result_strs = []
-        for i, l in enumerate(list_y):
-            my_str = f"{list_y[i]} {list_y_logits[i]}\n"
-            result_strs.append(my_str)
-        with open(f'{outputdir}/../test_inference.txt', mode='w') as f:
-            f.writelines(result_strs)
-        #
-        false_positive_rates, true_positive_rates, thresholds = metrics.roc_curve(list_y, list_y_logits)
-        auroc = metrics.auc(false_positive_rates, true_positive_rates)
-        #
-        plt.rcParams["font.size"] = 15
-        plt.plot(false_positive_rates, true_positive_rates, label = f'Area Under Curve = {auroc:0.2f}')
-        plt.legend()
-        plt.title('Receiver Operating Characteristic Curve')
-        plt.xlabel('FPR: False positive rate')
-        plt.ylabel('TPR: True positive rate')
-        plt.grid()
-        plt.savefig(f'{outputdir}/../sklearn_roc_curve.png')
-        #
-        precisions, recalls, thresholds = metrics.precision_recall_curve(list_y, list_y_logits)
-        aps = metrics.average_precision_score(list_y, list_y_logits)
-        plt.clf()
-        plt.rcParams["font.size"] = 15
-        plt.plot(recalls, precisions, label = f'Average precision score = {aps:0.2f}') # plt.plot(horizontal, vertical)
-        plt.legend()
-        plt.title('Precision-Recall Curve')
-        plt.xlabel('Recall')
-        plt.ylabel('Precision')
-        plt.grid()
-        plt.savefig(f'{outputdir}/../sklearn_precision_recall_curve.png')
-        #
-        acc_mean = torch.stack([output['num_correct']
-                                    for output in outputs]).sum().float()
-        acc_mean /= (len(outputs) * self.hparams.batch_size)
-        total_specified_label_in_pred = torch.stack([output['num_specified_label_in_pred']
-                                    for output in outputs]).sum().float()
-        total_specified_label_in_target = torch.stack([output['num_specified_label_in_target']
-                                    for output in outputs]).sum().float()
-        total_specified_right = torch.stack([output['num_specified_right']
-                                    for output in outputs]).sum().float()
-        recall = total_specified_right / total_specified_label_in_target
-        precision = total_specified_right / total_specified_label_in_pred
-        if (recall + precision)  < 0.0001:
-            f_score = 0
-        else:
-            f_score = (2*recall*precision) / (recall + precision)
-        
-        return {'log': {'0performance/acc_test': acc_mean,
-                        '0performance/auc': auroc,
-                        '0performance/average_precision_score': aps,
-                        '0performance/recall': recall,
-                        '0performance/precision': precision,
-                        '0performance/f_score': f_score,
-                        'step': 0}}
 
     def configure_optimizers(self):
         optimizer = optim.Adam(filter(lambda p: p.requires_grad,
@@ -412,14 +327,8 @@ class TransferLearningModel(pl.LightningModule):
                                         transforms.Resize((resize, resize)),
                                         transforms.ToTensor()
                                     ]))
-        test_dataset = ImageFolder(root=data_path.joinpath('test'),
-                                    transform=transforms.Compose([
-                                        transforms.Resize((resize, resize)),
-                                        transforms.ToTensor()
-                                    ]))
         self.dataset = {'train': train_dataset,
-                        'val': val_dataset,
-                        'test': test_dataset}
+                        'val': val_dataset}
         self.weight_category = {}
         for k, d in self.dataset.items():
             n_items = list(Counter(d.targets).values())
@@ -444,10 +353,6 @@ class TransferLearningModel(pl.LightningModule):
     def val_dataloader(self):
         log.info('Validation data loaded.')
         return self.__dataloader(mode='val')
-
-    def test_dataloader(self):
-        log.info('Validation data loaded.')
-        return self.__dataloader(mode='test')
 
 
     @staticmethod
@@ -565,13 +470,6 @@ def main(hparams: argparse.Namespace) -> None:
         max_epochs=hparams.max_epochs)
     trainer.fit(model)
 
-    #my_map_location = f'cuda:{hparams.gpu}'
-    #print(my_map_location)
-    #model = model.load_from_checkpoint(
-    #                        trainer.checkpoint_callback.kth_best_model,
-    #                        map_location= my_map_location)
-    #trainer.test(model)
-
 
 def get_args() -> argparse.Namespace:
     parent_parser = argparse.ArgumentParser(add_help=False)
@@ -580,7 +478,7 @@ def get_args() -> argparse.Namespace:
                                type=str,
                                #default='dataset/cats_and_dogs_filtered_orig',
                                default='my_dataset',
-                               help='Root directory of dataset. train, val, and test. category must be 0_negative and 1_positive')
+                               help='Root directory of dataset. train and val. category must be 0_negative and 1_positive')
     parent_parser.add_argument('--out_dir_name',
                                metavar='DIR',
                                type=str,
